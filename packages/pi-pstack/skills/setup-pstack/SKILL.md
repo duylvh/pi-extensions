@@ -21,6 +21,8 @@ Roles: feature, refactoring; bug-fix; perf-issue; hillclimb; judgment and prose;
 
 Panel roles (`arena runners`, `arena cross-judge pool`, `architect runners`, `interrogate reviewers`) are arrays: one subagent per entry.
 
+The file stores no reasoning budget. Each `Agent` spawn sets `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) per the Subagents section of `poteto-mode`, and a budget the user states in the task sets the starting level.
+
 The file is user-level.
 Do not commit it.
 If `~/.pi/agent/pstack-models.md` exists and the JSON does not, the extension migrates it on session start.
