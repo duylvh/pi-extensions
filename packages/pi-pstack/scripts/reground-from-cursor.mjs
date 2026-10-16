@@ -5,6 +5,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	rmdirSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -17,10 +18,11 @@ const EXTENSION_COMMANDS = new Set(["/poteto-mode", "/setup-pstack", "/pstack"])
 
 const CURSOR_FRONTMATTER_KEYS = new Set(["mode", "icon", "color", "reminder", "paths"]);
 
-const CURSOR_SLUG_ALT =
-	"grok-4\\.6-fast-xhigh|claude-fable-5-1-thinking-max|gpt-5\\.6-sol-max|claude-opus-5-thinking-xhigh";
+const CURSOR_SLUG =
+	"(?:claude|grok|gpt|composer)-[a-z0-9.]+(?:-[a-z0-9.]+)*?-(?:max|xhigh|high|medium|low)(?:-fast)?(?![a-z0-9-])";
+export const CURSOR_SLUG_RE = new RegExp(`(?<![\\w-])${CURSOR_SLUG}`);
 const CURSOR_DEFAULT_SLUGS = new RegExp(
-	"`?(?:" + CURSOR_SLUG_ALT + ")`?(?:\\s*,\\s*`?(?:" + CURSOR_SLUG_ALT + ")`?)*",
+	"`?" + CURSOR_SLUG + "`?(?:\\s*,\\s*`?" + CURSOR_SLUG + "`?)*",
 	"g",
 );
 
@@ -35,13 +37,13 @@ export const CLASS_RULES = [
 	{ pattern: "README.md", class: "never-copy" },
 	{ pattern: "LICENSE", class: "never-copy" },
 
+	{ pattern: "skills/poteto-mode/scripts/check-plan.test.ts", class: "never-copy" },
+
 	{ pattern: "skills/deslop/**", class: "pi-only" },
 	{ pattern: "skills/setup-pstack/SKILL.md", class: "pi-only" },
-	{ pattern: "skills/poteto-mode/scripts/check-plan.mjs", class: "pi-only" },
+	{ pattern: "skills/poteto-help/SKILL.md", class: "pi-only" },
 	{ pattern: "skills/poteto-mode/scripts/check-plan.test.mjs", class: "pi-only" },
-	{ pattern: "skills/poteto-mode/scripts/package.json", class: "pi-only" },
 	{ pattern: "skills/poteto-mode/scripts/bun.lock", class: "pi-only" },
-	{ pattern: "skills/poteto-mode/scripts/worktree-audit.sh", class: "pi-only" },
 
 	{ pattern: "skills/principle-*/**", class: "copy" },
 	{ pattern: "skills/typescript-best-practices/references/patterns.md", class: "copy" },
@@ -65,113 +67,108 @@ const SKIP_WALK = new Set([".git", "node_modules"]);
 
 let skillNamesForSlash = new Set(["deslop"]);
 
+const READONLY_PROMPT =
+	"a read-only prompt (`Agent` has no readonly flag, so the prompt forbids edits)";
+const VERIFY_HARNESS = "the project's verification skill or harness";
+const SESSION_DIR = "`~/.pi/agent/sessions/--<cwd with / as ->--/`";
+const WORKTREE_AGENT =
+	'a background `Agent` in its own verified worktree (`isolation: "worktree"`, per **Worktree safety** in the **poteto-mode** skill)';
+const WORKTREE_SAFETY =
+	'**Worktree safety.** `isolation: "worktree"` takes effect only when `pi-subagents` has worktrees enabled. Otherwise `Agent` drops the field without an error and the worker shares this checkout. Before spawning parallel writers, inspect the live `Agent` schema for an `isolation` input. If it is absent, run `git worktree add <path> -b <branch>` per writer and pass that exact path in the prompt. Before any edit, each writer must verify its assigned worktree with `pwd` and `git branch --show-current` and stop on a path or branch mismatch. Use absolute file paths under that worktree and `git -C <path>` for Git commands. If separate writer worktrees cannot be verified, do not fan out writers. Topology operations (chain rebases, force-pushes, base retargets) run only in a verified separate worktree, even when serial, never in the coordinator\'s checkout. Never change user settings or fall back to the shared checkout to make a fan-out fit. Read-only fan-out needs no isolation.';
+
+// Match whole Cursor instructions before replacing individual tool names.
 export const SEAMS = [
+	{ id: "ask-question", cursor: /AskQuestion/g, pi: "ask_user" },
+
 	{
-		id: "ask-question",
-		cursor: /AskQuestion/g,
-		pi: "ask_user_question",
-	},
-	{
-		id: "models-path",
-		cursor: /~\/\.cursor\/rules\/pstack-models\.mdc/g,
-		pi: "~/.pi/agent/pstack/models.json",
-	},
-	{
-		id: "sessions-path",
-		cursor: /~\/\.cursor\/projects\/[^`\s]*/g,
-		pi: "~/.pi/agent/sessions/",
-	},
-	{
-		id: "skills-dir",
-		cursor: /(?:~\/\.cursor\/skills\/|\.cursor\/skills\/)/g,
-		pi: (m) => (m.startsWith("~") ? "~/.pi/agent/skills/" : ".pi/skills/"),
-	},
-	{
-		id: "plugins-dir",
-		cursor: /~\/\.cursor\/plugins\//g,
-		pi: "~/.pi/agent/npm/node_modules/",
-	},
-	{
-		id: "deslop",
-		cursor: /the `deslop` skill from the `cursor-team-kit` plugin \(`\/deslop`\)|(?<!skill:)\/deslop\b/g,
-		pi: (m) => (m.includes("cursor-team-kit") ? "the **deslop** skill (`/skill:deslop`)" : "/skill:deslop"),
-	},
-	{
-		id: "control-pair",
-		cursor: /`control-ui` or `control-cli`|`control-cli` or `control-ui`/g,
-		pi: "the project's verification skill or harness",
-	},
-	{
-		id: "control-from",
+		id: "orch-worker",
 		cursor:
-			/`control-ui` from (?:`[^`]*`|\.)|`control-cli` from (?:`[^`]*`|\.)/g,
-		pi: "the project's verification skill or harness",
+			/Always `environment: "cloud"` unless the task needs this machine: `control-ui` or `control-cli` runtime verification \(from `cursor-team-kit`\)\. Reading local transcripts under `agent-transcripts\/`\./g,
+		pi: `Always ${WORKTREE_AGENT} unless the task needs this machine or the main checkout's uncommitted state: runtime verification through ${VERIFY_HARNESS}. Reading local session transcripts under \`~/.pi/agent/sessions/\`.`,
 	},
 	{
-		id: "control-publish",
+		id: "control-such-as",
+		cursor: /with the matching control skill \(such as `control-ui` or `control-cli` from `cursor-team-kit`\)/g,
+		pi: `with ${VERIFY_HARNESS}`,
+	},
+	{
+		id: "control-runtime",
+		cursor: /`control-ui` or `control-cli` runtime verification \(from `cursor-team-kit`\)/g,
+		pi: `runtime verification through ${VERIFY_HARNESS}`,
+	},
+	{
+		id: "orch-nesting",
 		cursor:
-			/the matching control skill\.\s*(?:`[^`]+`\s*)?publishes `control-cli` \(CLIs and TUIs\) and `control-ui` \(browser \/ Electron \/ web UIs\)/g,
-		pi: "verify on the real surface: drive the browser or app through the project's verification skill or an automation harness",
+			/\(nesting works to depth 3, and a nested spawn has the full Task schema including `environment`\)/g,
+		pi: "(nested spawns exist only when `pi-subagents` nesting is enabled in the session, so confirm that before you plan on a deeper tree)",
 	},
 	{
-		id: "cursor-team-kit",
-		cursor: /`cursor-team-kit`|cursor-team-kit/g,
-		pi: "the project's verification skill",
+		id: "orch-cloud-store",
+		cursor: /Cloud agents cannot read the local store, so their briefs inline what they need or point at repo paths\./g,
+		pi: "A worktree agent sees only committed files, so its brief inlines what it needs or points at repo paths.",
 	},
 	{
-		id: "subagent-poteto",
-		cursor: /subagent_type:\s*"poteto-agent"/g,
-		pi: 'subagent({ agent: "poteto-agent", task })',
+		id: "orch-spawn-paste",
+		cursor:
+			/Local spawns may reference the standing-orders file by store path\. Verbatim paste is for cloud spawns and every resume\./g,
+		pi: "Spawns on the main checkout may reference the standing-orders file by store path. Verbatim paste is for worktree-isolated spawns and every resume.",
 	},
 	{
-		id: "subagent-sicko",
-		cursor: /subagent_type:\s*"Comment Sicko"/g,
-		pi: 'subagent({ agent: "comment-sicko", task })',
+		id: "orch-budget",
+		cursor: /its spawn budget with the cloud default and the local exception list/g,
+		pi: "its spawn budget with the worktree default and the main-checkout exception list",
 	},
 	{
-		id: "subagent-worker",
-		cursor: /`subagent_type`:\s*`generalPurpose`|subagent_type:\s*"generalPurpose"|subagent_type:\s*`?generalPurpose`?/g,
-		pi: 'agent: "worker"',
+		id: "orch-rebase",
+		cursor: /Chain rebases run in cloud\. A local rebase at this scale takes the laptop down\./g,
+		pi: `Chain rebases run in ${WORKTREE_AGENT}, even when the stacker is serial, never in the coordinator's checkout.`,
 	},
 	{
-		id: "subagent-type-leftover",
-		cursor: /`subagent_type`|subagent_type/g,
-		pi: "agent",
+		id: "orch-dashboard",
+		cursor: /the cloud agent's status in the Cursor dashboard/g,
+		pi: "the agent's status from `get_subagent_result`",
 	},
 	{
-		id: "inherit-parent",
-		cursor: CURSOR_DEFAULT_SLUGS,
-		pi: "inherit-parent",
+		id: "orch-restart",
+		cursor: /After a Cursor restart: local agents are dead, cloud work is not\./g,
+		pi: "After a restart: running agents are dead, pushed branches and PRs are not.",
 	},
 	{
-		id: "task-subagent",
-		cursor: /Task subagent/g,
-		pi: "subagent",
+		id: "orch-reattach",
+		cursor: /reattach cloud work by PR and branch/g,
+		pi: "reattach work by PR and branch",
 	},
 	{
-		id: "task-call",
-		cursor: /every `Task` call/g,
-		pi: "every `subagent()` launch",
+		id: "loop-hourly",
+		cursor: /`\/loop 1h`/g,
+		pi: "an hourly recurring wake",
 	},
 	{
-		id: "task-calls",
-		cursor: /`Task` calls/g,
-		pi: "`subagent()` launches",
+		id: "loop-command",
+		cursor: /using Cursor's `\/loop` command \(a built-in, not a pstack skill\)/g,
+		pi: "from what this session offers: a scheduled prompt or recurring wake if a tool provides one, otherwise a watcher subagent",
+	},
+	{ id: "with-loop", cursor: /with Cursor's `\/loop` command/g, pi: "with a recurring wake" },
+	{
+		id: "loop-per-component",
+		cursor: /`\/loop` per component until the diff is zero\./g,
+		pi: "Repeat per component until the diff is zero.",
 	},
 	{
-		id: "task-call-one",
-		cursor: /One `Task` call/g,
-		pi: "One `subagent()` launch",
+		id: "loop-predicate",
+		cursor: /give `\/loop` that predicate/g,
+		pi: "give the recurring wake that predicate",
+	},
+	{ id: "loop-until", cursor: /\/loop until (\w+)/g, pi: (_m, what) => `run until ${what}` },
+	{
+		id: "babysit-replaces",
+		cursor: /replaces Cursor's built-in babysit skill for these requests, so do not route there/g,
+		pi: "replaces any generic review or babysit command for these requests, so do not route there",
 	},
 	{
-		id: "three-task",
-		cursor: /three `Task` calls/g,
-		pi: "three `subagent()` launches",
-	},
-	{
-		id: "readonly-true",
-		cursor: /`readonly`: `true`/g,
-		pi: "tools: read-only (`read, grep, find, ls, bash`)",
+		id: "create-skill-hand",
+		cursor: /hand to Cursor's built-in `create-skill` skill and run its draft \/ test \/ iterate loop/g,
+		pi: "follow `playbooks/authoring-a-skill.md` in the **poteto-mode** skill and run its draft / test / iterate loop",
 	},
 	{
 		id: "create-skill-builtin",
@@ -184,6 +181,218 @@ export const SEAMS = [
 		pi: "Author SKILL.md to the Pi Agent Skills standard. Run `/skill:unslop` on every line.",
 	},
 	{
+		id: "env-local",
+		cursor:
+			/Use `environment: "local"` only when the worker needs access to something on the user's computer\./g,
+		pi: "Use `isolation: \"off\"` only when the worker needs this checkout's uncommitted state or something else on the user's computer.",
+	},
+	{
+		id: "cloud-base-branch",
+		cursor: /When a worker must start from a non-default pushed branch, pass `cloud_base_branch`\./g,
+		pi: `When a worker must start from a non-default branch, name that branch and its SHA in the brief and have the worker check it out first.\n\n${WORKTREE_SAFETY}`,
+	},
+
+
+	{
+		id: "models-path",
+		cursor: /~\/\.cursor\/rules\/pstack-models\.mdc/g,
+		pi: "~/.pi/agent/pstack/models.json",
+	},
+	{
+		id: "models-rule",
+		cursor: /the `pstack-models\.mdc` rule/g,
+		pi: "the pstack role table (`~/.pi/agent/pstack/models.json`)",
+	},
+	{ id: "models-file", cursor: /`pstack-models\.mdc`/g, pi: "`~/.pi/agent/pstack/models.json`" },
+	{
+		id: "rule-missing",
+		cursor: /the rule or (that|the) line is missing/g,
+		pi: (_m, which) => `the role table or ${which} line is missing`,
+	},
+	{
+		id: "setup-rule",
+		cursor: /the `\/setup-pstack` rule/g,
+		pi: "the injected pstack role table",
+	},
+
+	{
+		id: "recall-transcripts",
+		cursor:
+			/`~\/\.cursor\/projects\/<slug>\/agent-transcripts\/<uuid>\/<uuid>\.jsonl`, where `<slug>` is the workspace path with the leading slash dropped and each "\/" turned into "-" \(so `\/Users\/you\/proj` becomes `Users-you-proj`\)\. Every line is one chat message\./g,
+		pi: '`~/.pi/agent/sessions/--<slug>--/<timestamp>_<uuid>.jsonl`, where `<slug>` is the workspace path with the leading slash dropped and each "/" turned into "-" (so `/Users/you/proj` becomes `--Users-you-proj--`). Every line is one JSON entry. Chat turns are the `"type":"message"` entries.',
+	},
+	{
+		id: "transcripts-ls",
+		cursor:
+			/ls -t <agent-transcripts>\/\*\.jsonl <agent-transcripts>\/\*\/\*\.jsonl <agent-transcripts>\/\*\/subagents\/\*\.jsonl 2>\/dev\/null \| head -10/g,
+		pi: "ls -t <session-dir>/*.jsonl 2>/dev/null | head -10",
+	},
+	{
+		id: "transcripts-layouts",
+		cursor:
+			/That covers the legacy flat \(`<id>\.jsonl`\), current nested \(`<id>\/<id>\.jsonl`\), and subagent \(`<parent>\/subagents\/<child>\.jsonl`\) layouts\. For each candidate, read the first JSONL line\. Take the file whose `message\.content\[0\]\.text` contains the conversation's opening user prompt\./g,
+		pi: 'Pi writes one flat `<timestamp>_<uuid>.jsonl` per session. For each candidate, read the first entry with `"type":"message"` and `"role":"user"`. Take the file whose first user message contains the conversation\'s opening user prompt.',
+	},
+	{
+		id: "session-dir-open-paren",
+		cursor:
+			/the active workspace's `agent-transcripts\/` directory \(the system prompt names the path\. Do not glob/g,
+		pi: `the active workspace's session directory (${SESSION_DIR}. Do not glob`,
+	},
+	{
+		id: "session-dir-named",
+		cursor: /the `agent-transcripts\/` directory the system prompt names/g,
+		pi: `this workspace's session directory (${SESSION_DIR})`,
+	},
+	{
+		id: "session-dir-active",
+		cursor:
+			/the active workspace's `agent-transcripts\/` directory \(the system prompt names (?:the|this) path\)/g,
+		pi: `the active workspace's session directory (${SESSION_DIR})`,
+	},
+	{
+		id: "session-dir-workspace",
+		cursor:
+			/The system prompt names the workspace's `agent-transcripts\/` directory\. Use only that path\./g,
+		pi: `Use only this workspace's session directory (${SESSION_DIR}).`,
+	},
+	{
+		id: "sessions-path",
+		cursor: /~\/\.cursor\/projects\/[^`\s]*/g,
+		pi: "~/.pi/agent/sessions/",
+	},
+	{ id: "transcripts-dir", cursor: /`agent-transcripts\/`/g, pi: "`~/.pi/agent/sessions/`" },
+	{
+		id: "skills-dir",
+		cursor: /(?:~\/\.cursor\/skills\/|\.cursor\/skills\/)/g,
+		pi: (m) => (m.startsWith("~") ? "~/.pi/agent/skills/" : ".pi/skills/"),
+	},
+	{
+		id: "plugins-dir",
+		cursor: /~\/\.cursor\/plugins\//g,
+		pi: "~/.pi/agent/npm/node_modules/",
+	},
+
+	{
+		id: "deslop",
+		cursor: /the `deslop` skill from the `cursor-team-kit` plugin \(`\/deslop`\)|(?<!skill:)\/deslop\b/g,
+		pi: (m) => (m.includes("cursor-team-kit") ? "the **deslop** skill (`/skill:deslop`)" : "/skill:deslop"),
+	},
+	{
+		id: "control-pick",
+		cursor:
+			/Browser, Electron, and web UIs use `control-ui` from `cursor-team-kit`\. CLIs and TUIs use `control-cli` from `cursor-team-kit`\./g,
+		pi: `Browser, Electron, web UIs, CLIs, and TUIs use ${VERIFY_HARNESS}.`,
+	},
+	{
+		id: "control-drive",
+		cursor: /Drive through `control-ui` or `control-cli` from `cursor-team-kit`\./g,
+		pi: `Drive through ${VERIFY_HARNESS}.`,
+	},
+	{
+		id: "control-matching",
+		cursor: /via the matching control skill/g,
+		pi: `through ${VERIFY_HARNESS}`,
+	},
+	{
+		id: "control-pair",
+		cursor: /`control-ui` or `control-cli`|`control-cli` or `control-ui`/g,
+		pi: VERIFY_HARNESS,
+	},
+	{
+		id: "control-from",
+		cursor: /`control-ui` from (?:`[^`]*`|\.)|`control-cli` from (?:`[^`]*`|\.)/g,
+		pi: VERIFY_HARNESS,
+	},
+	{
+		id: "control-publish",
+		cursor:
+			/the matching control skill\.\s*(?:`[^`]+`\s*)?publishes `control-cli` \(CLIs and TUIs\) and `control-ui` \(browser \/ Electron \/ web UIs\)/g,
+		pi: "verify on the real surface: drive the browser or app through the project's verification skill or an automation harness",
+	},
+	{ id: "cursor-team-kit", cursor: /`cursor-team-kit`|cursor-team-kit/g, pi: "the project's verification skill" },
+	{
+		id: "visualize-skill",
+		cursor: /a chart or diagram from `\/visualize`/g,
+		pi: "a chart or diagram you drew from facts you have",
+	},
+	{ id: "visualize-chart", cursor: /a `\/visualize` chart for numbers/g, pi: "a chart for numbers" },
+
+	{
+		id: "how-spawn",
+		cursor: /Every spawn is a Task subagent with `subagent_type: generalPurpose` and `readonly: true`\./g,
+		pi: `Every spawn is an \`Agent\` call with \`subagent_type: "general-purpose"\` and ${READONLY_PROMPT}.`,
+	},
+	{
+		id: "interrogate-spawn",
+		cursor: /`subagent_type: generalPurpose`, `readonly: true`, and `model`/g,
+		pi: `\`subagent_type: "general-purpose"\`, ${READONLY_PROMPT}, and \`model\``,
+	},
+	{
+		id: "why-spawn",
+		cursor:
+			/Every spawn is `generalPurpose` with `readonly: false` \(agent mode\)\. \*\*Do not use readonly\/Ask mode\.\*\* It strips MCP access/g,
+		pi: 'Every spawn is an `Agent` call with `subagent_type: "general-purpose"`. **Do not pass `isolated: true`.** It strips MCP access',
+	},
+	{ id: "agent-mode", cursor: /agent mode \(`readonly: false`\)/g, pi: "no `isolated: true`" },
+	{ id: "readonly-strips", cursor: /readonly strips MCPs?/g, pi: "`isolated: true` strips MCP tools" },
+	{
+		id: "readonly-judge",
+		cursor: /readonly judge subagent/g,
+		pi: "read-only judge subagent (its prompt forbids edits)",
+	},
+	{
+		id: "general-purpose-type",
+		cursor: /`subagent_type:\s*generalPurpose`|subagent_type:\s*generalPurpose/g,
+		pi: '`subagent_type: "general-purpose"`',
+	},
+	{
+		id: "reject-slug",
+		cursor:
+			/If the Task tool rejects a slug, use the default and say so\. If it rejects the default, use the closest valid slug of the same family from its error message\./g,
+		pi: "If the `Agent` tool rejects a slug, use `inherit-parent` (omit `model`) and say so.",
+	},
+	{
+		id: "reject-entry",
+		cursor:
+			/If the Task tool rejects a configured entry, run that (reviewer|seat) on its family's (?:table )?default and say so\..*?(?= (?:Do not block|Spawn more))/g,
+		pi: (_m, role) =>
+			`If the \`Agent\` tool rejects a configured entry, run that ${role} on \`inherit-parent\` (omit \`model\`) and say so.`,
+	},
+	{
+		id: "fallback-either",
+		cursor: /apply either fallback to it/g,
+		pi: "apply that fallback to it",
+	},
+	{
+		id: "resume-reuse",
+		cursor: /Resume, message, or queue a follow-up on an existing subagent/g,
+		pi: "Resume (`Agent` with `resume`), steer (`steer_subagent`), or queue a follow-up on an existing subagent",
+	},
+	{ id: "task-tool", cursor: /\bTask tool\b/g, pi: "`Agent` tool" },
+	{ id: "task-subagent", cursor: /Task subagent/g, pi: "`Agent` subagent" },
+	{ id: "task-article", cursor: /\ba `Task`/g, pi: "an `Agent`" },
+	{ id: "task-response", cursor: /`Task` response body/g, pi: "`Agent` result" },
+	{ id: "task-tick", cursor: /`Task`/g, pi: "`Agent`" },
+	{
+		id: "effort-pick",
+		cursor: /reasoning level and fast or standard speed for the job/g,
+		pi: "`thinking` level for the job",
+	},
+
+	{
+		id: "env-cloud",
+		cursor: /`environment: "cloud"`/g,
+		pi: '`isolation: "worktree"`',
+	},
+	{ id: "loop-skill", cursor: /via the loop skill/g, pi: "via a recurring wake" },
+	{
+		id: "cursor-cloud-agent",
+		cursor: /a Cursor cloud agent/g,
+		pi: WORKTREE_AGENT,
+	},
+
+	{
 		id: "create-skill-cursor",
 		cursor: /Cursor's built-in `create-skill`/g,
 		pi: "`playbooks/authoring-a-skill.md`",
@@ -193,76 +402,37 @@ export const SEAMS = [
 		cursor: /`create-skill`/g,
 		pi: "`playbooks/authoring-a-skill.md`",
 	},
-	{
-		id: "create-skill-bare",
-		cursor: /create-skill/g,
-		pi: "authoring-a-skill",
-	},
-	{
-		id: "under-loop",
-		cursor: /under `\/loop`/g,
-		pi: "under a recurring wake",
-	},
-	{
-		id: "cursor-loop",
-		cursor: /Cursor's `\/loop` command/g,
-		pi: "a recurring wake",
-	},
-	{
-		id: "with-loop",
-		cursor: /with Cursor's `\/loop` command/g,
-		pi: "with a recurring wake",
-	},
-	{
-		id: "slash-loop",
-		cursor: /`\/loop`/g,
-		pi: "a recurring wake",
-	},
+	{ id: "create-skill-bare", cursor: /create-skill/g, pi: "authoring-a-skill" },
+
+	{ id: "under-loop", cursor: /under `\/loop`/g, pi: "under a recurring wake" },
+	{ id: "cursor-loop", cursor: /Cursor's `\/loop` command/g, pi: "a recurring wake" },
+	{ id: "slash-loop", cursor: /`\/loop`/g, pi: "a recurring wake" },
 	{
 		id: "babysit-cursor",
 		cursor: /not Cursor's built-in babysit skill/g,
 		pi: "not any generic review command",
 	},
 	{
-		id: "loop-until",
-		cursor: /\/loop until X/g,
-		pi: "run until X",
+		id: "control-skill",
+		cursor: /via the control skill/g,
+		pi: `through ${VERIFY_HARNESS}`,
 	},
+	{ id: "loop-terminal", cursor: /a real terminal `\/loop`/g, pi: "a recurring wake" },
 	{
-		id: "loop-command",
-		cursor: /Cursor's `\/loop` command \(a built-in, not a pstack skill\)/g,
-		pi: "a recurring wake or watcher loop (a built-in, not a pstack skill)",
-	},
-	{
-		id: "loop-terminal",
-		cursor: /a real terminal `\/loop`/g,
-		pi: "a recurring wake",
+		id: "mcp-discovery",
+		cursor:
+			/list the available MCPs from the Cursor environment\. Use the available-tools map when present\. Otherwise inspect the `mcps\/` directory Cursor exposes for enabled MCP servers\./g,
+		pi: "list the MCP servers and tools in this session's tool list. If MCP servers sit behind a gateway tool, ask the gateway for its server and tool list before classifying.",
 	},
 	{
 		id: "home-cursor",
 		cursor: /\$HOME\/\.cursor\/projects\/[^\s"']*/g,
 		pi: "$HOME/.pi/agent/sessions",
 	},
-	{
-		id: "cloud-agent",
-		cursor: /, cloud-agent URL,/g,
-		pi: ", an async run record,",
-	},
-	{
-		id: "cursor-restart",
-		cursor: /, a Cursor restart,/g,
-		pi: ", a restart,",
-	},
-	{
-		id: "cloud-vm",
-		cursor: /on its own cloud VM at the PR head/g,
-		pi: "at the PR head",
-	},
-	{
-		id: "setup-rule",
-		cursor: /the `\/setup-pstack` rule/g,
-		pi: "the injected pstack role table",
-	},
+	{ id: "cloud-agent", cursor: /, cloud-agent URL,/g, pi: ", an async run record," },
+	{ id: "cloud-agent-article", cursor: /a cloud-agent URL/g, pi: "an async run record" },
+	{ id: "cursor-restart", cursor: /, a Cursor restart,/g, pi: ", a restart," },
+	{ id: "cloud-vm", cursor: /on its own cloud VM at the PR head/g, pi: "at the PR head" },
 	{
 		id: "ten-lanes",
 		cursor: /Ten lanes on [^\n]+ at the PR head/g,
@@ -278,19 +448,82 @@ export const SEAMS = [
 		cursor: /arm a `\/goal` with this exact text/g,
 		pi: "record a standing goal with this exact text",
 	},
+	{ id: "standing-goal-tick", cursor: /the armed \/goal/g, pi: "the standing goal" },
+
 	{
-		id: "standing-goal-tick",
-		cursor: /the armed \/goal/g,
-		pi: "the standing goal",
+		id: "default-runner-pair",
+		cursor: new RegExp(`default to one each on \`?${CURSOR_SLUG}\`? and \`?${CURSOR_SLUG}\`?`, "g"),
+		pi: "default to two runners, both `inherit-parent`",
+	},
+	{
+		id: "default-judge-pair",
+		cursor: new RegExp(`choose from \`?${CURSOR_SLUG}\`? and \`?${CURSOR_SLUG}\`?`, "g"),
+		pi: "choose `inherit-parent`",
+	},
+	{
+		id: "default-use-pair",
+		cursor: new RegExp(`use \`?${CURSOR_SLUG}\`? and \`?${CURSOR_SLUG}\`?`, "g"),
+		pi: "use two `inherit-parent` runners",
+	},
+	{
+		id: "inherit-pair",
+		cursor: new RegExp(`\`?${CURSOR_SLUG}\`? and \`?${CURSOR_SLUG}\`?`, "g"),
+		pi: "`inherit-parent`",
+	},
+	{ id: "inherit-parent", cursor: CURSOR_DEFAULT_SLUGS, pi: "`inherit-parent`" },
+	{
+		id: "control-noun",
+		cursor: /\b[Cc]ontrol skill\b/g,
+		pi: (m) => (m[0] === "C" ? "Verification skill" : "verification skill"),
 	},
 	{
 		id: "slash-skill",
-		cursor: /(?<![\w/])\/([a-z][a-z0-9-]*)\b/g,
+		cursor: /(?<![\w/.])\/([a-z][a-z0-9-]*)\b/g,
 		pi: (m, name) => {
 			if (EXTENSION_COMMANDS.has(`/${name}`)) return m;
 			if (!skillNamesForSlash.has(name)) return m;
 			return `/skill:${name}`;
 		},
+	},
+];
+
+export const FILE_SEAMS = [
+	{
+		id: "plan-lanes",
+		files: ["skills/poteto-mode/scripts/check-plan.mjs"],
+		cursor: /const LANES = [^\n]+;/,
+		pi: "const LANES = /Ten lanes (?:on `[^`<>]+` )?at the PR head/;",
+	},
+	{
+		id: "plan-lanes-message",
+		files: ["skills/poteto-mode/scripts/check-plan.mjs"],
+		cursor: /lacks "Ten lanes on \\`<swarm workers model>\\` at the PR head" with the model filled in/,
+		pi: 'lacks "Ten lanes at the PR head"',
+	},
+	{
+		id: "plan-tick-marker",
+		files: ["skills/poteto-mode/scripts/check-plan.mjs"],
+		cursor: /"\/loop 1h"/,
+		pi: '"hourly recurring wake"',
+	},
+	{
+		id: "tools-package-name",
+		files: ["skills/poteto-mode/scripts/package.json"],
+		cursor: /"name": "@cursor-skill\/poteto-mode-tools"/,
+		pi: '"name": "@zenspc/pi-pstack-tools"',
+	},
+	{
+		id: "tools-package-test",
+		files: ["skills/poteto-mode/scripts/package.json"],
+		cursor: /bun test orch watch-pr check-plan\.test\.ts/,
+		pi: "bun test orch watch-pr",
+	},
+	{
+		id: "audit-transcripts",
+		files: ["skills/poteto-mode/scripts/worktree-audit.sh"],
+		cursor:
+			/# Transcripts dir: ~\/\.cursor\/projects\/<slugified-repo-path>\/agent-transcripts\.\nslug=\$\(printf '%s' "\$main_wt" \| sed 's#\^\/##; s#\/#-#g'\)\ntranscripts="\$HOME\/\.cursor\/projects\/\$slug\/agent-transcripts"/,
+		pi: '# Transcripts dir: ~/.pi/agent/sessions (JSONL, one file per session).\ntranscripts="$HOME/.pi/agent/sessions"',
 	},
 ];
 
@@ -451,15 +684,6 @@ function needsReadmeCounts(to, counts) {
 	);
 }
 
-function needsDropHowCritics(to) {
-	const files = [
-		"extensions/pstack/config.ts",
-		"extensions/pstack/config.test.ts",
-		"skills/setup-pstack/SKILL.md",
-	];
-	return files.some((rel) => readOptional(join(to, rel)).includes("how critics"));
-}
-
 const POTETO_INTRO = [
 	"`/poteto-mode` enables this mode for the rest of the session.",
 	"`/poteto-mode off` disables it.",
@@ -470,14 +694,25 @@ const POTETO_INTRO = [
 ].join("\n");
 
 const SUBAGENT_DEFAULTS =
-	"**Defaults for every `subagent()` launch.** file pointers not inlined context. The default for every role is the parent session model (`inherit-parent`; omit `model`). `/setup-pstack` writes `~/.pi/agent/pstack/models.json` and overrides per role. Pass a configured real slug as `model:`. `inherit-parent` and `auto` mean omit `model`. Code delegates tier by difficulty. The hardest changes (cross-cutting design, gnarly concurrency, subtle algorithms) go to the model configured for `hardest tasks`, else the parent model, when the task needs judgment or the intent is vague, and to your strongest instruction-following model when the work is a precisely specified sequence of steps to execute to the letter; trivial mechanical edits go to your fast code model. Per-role lines in the injected pstack role table override these defaults and the model choices in the routed skills (`how`, `why`, `arena`, `swarm`, `architect`, `interrogate`, `reflect`); a role with no line keeps its default.";
+	"**Defaults for every `Agent` call.** `run_in_background: true`, file pointers not inlined context, explicit `model` per role. Every role defaults to the parent session model (`inherit-parent`; omit `model`). `/setup-pstack` writes `~/.pi/agent/pstack/models.json`, and the injected pstack role table lists only roles with a real provider-qualified slug. Pass that slug as `model`. `inherit-parent` and `auto` mean omit `model`. Never pass `isolated: true`, because it strips MCP tools. Code delegates tier by difficulty. The hardest changes (cross-cutting design, gnarly concurrency, subtle algorithms) go to the model configured for `hardest tasks`, else the parent model, when the task needs judgment or the intent is vague, and to your strongest instruction-following model when the work is a precisely specified sequence of steps to execute to the letter. Trivial mechanical edits go to your fast code model. Per-role lines in the injected pstack role table override these defaults and the model choices in the routed skills (`how`, `why`, `arena`, `swarm`, `architect`, `interrogate`, `reflect`). A role with no line keeps its default, and a role line of `inherit-parent` or `auto` runs that role on the parent chat model (omit `model`). Each code playbook's configured model comes from its line (`feature, refactoring`, `bug-fix`, `perf-issue`, or `hillclimb`), and the hardest changes read `hardest tasks`. Prose and judgment read `judgment and prose`.";
 
-function patchPotetoModePi(text) {
-	if (!text.includes("`/poteto-mode` enables this mode")) {
-		text = text.replace("# Poteto mode\n\n", `# Poteto mode\n\n${POTETO_INTRO}`);
-	}
-	text = text.replace(/\*\*Defaults for every `Task` call\.\*\*[^\n]*/, SUBAGENT_DEFAULTS);
-	text = text.replace(/\*\*Defaults for every `subagent\(\)` launch\.\*\*`run_in_background:[^\n]*/, SUBAGENT_DEFAULTS);
+const MATCH_MODEL =
+	"**Match the model to the job.** Before each spawn, start from the role's line or default and pick the `thinking` level the job needs (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`). Omit `thinking` to run at the agent's own default level. If the user states a reasoning budget, such as \"max reasoning\" or \"keep it cheap\", that sets the starting level for every spawn. Raise it one step, up to `max`, for the hardest or subtlest work. Lower it one step for judgment and two or more steps for routine work. The `Agent` tool has no fast-mode variant, so choose speed through the model alone. Verification is the exception and stays on the `swarm workers` model. Change only `thinking` and keep the model the role names, so a diverse panel stays diverse. A role on `auto` or `inherit-parent` stays on the parent model. Pi clamps a level the model does not support, so do not retry with another level.";
+
+function replaceRequired(text, pattern, replacement, label) {
+	if (!pattern.test(text)) throw new Error(`poteto-mode patch target missing: ${label}`);
+	return text.replace(pattern, () => replacement);
+}
+
+export function patchPotetoModePi(text) {
+	text = replaceRequired(text, /# Poteto mode\n\n/, `# Poteto mode\n\n${POTETO_INTRO}`, "title");
+	text = replaceRequired(
+		text,
+		/\*\*Defaults for every `Task` call\.\*\*[^\n]*/,
+		`${SUBAGENT_DEFAULTS}\n\n${WORKTREE_SAFETY}`,
+		"defaults",
+	);
+	text = replaceRequired(text, /\*\*Match the model to the job\.\*\*[^\n]*/, MATCH_MODEL, "match the model");
 	return text;
 }
 
@@ -538,14 +773,6 @@ export function plan(paths) {
 			derived: "readme-counts",
 		});
 	}
-	if (needsDropHowCritics(paths.to)) {
-		actions.push({
-			kind: "patch",
-			dest: join(paths.to, "extensions/pstack/config.ts"),
-			derived: "drop-how-critics",
-		});
-	}
-
 	return { paths, actions, counts };
 }
 
@@ -598,7 +825,7 @@ export function applyFrontmatterPolicy(text, skillDir) {
 	return `---\n${lines.join("\n")}\n---\n${body}`;
 }
 
-export function applyBodyTransforms(text, _rel) {
+export function applyBodyTransforms(text) {
 	for (let i = 0; i < 20; i++) {
 		let next = text;
 		for (const seam of SEAMS) {
@@ -610,7 +837,17 @@ export function applyBodyTransforms(text, _rel) {
 	throw new Error("seam fixpoint did not converge");
 }
 
+export function applyFileTransforms(text, rel) {
+	for (const seam of FILE_SEAMS) {
+		if (!seam.files.includes(rel)) continue;
+		if (!seam.cursor.test(text)) throw new Error(`file seam ${seam.id} found no match in ${rel}`);
+		text = text.replace(seam.cursor, () => seam.pi);
+	}
+	return text;
+}
+
 export function renderWrite(action, paths) {
+	refreshSkillNames(paths.from, paths.to);
 	const src = join(paths.from, action.rel);
 	let text = readFileSync(src, "utf8");
 	const parts = action.rel.split("/");
@@ -619,11 +856,11 @@ export function renderWrite(action, paths) {
 	if (base === "SKILL.md") {
 		text = applyFrontmatterPolicy(text, skillDir);
 	}
-	if (action.class === "adapt") {
-		text = applyBodyTransforms(text, action.rel);
-	}
 	if (action.rel === "skills/poteto-mode/SKILL.md") {
 		text = patchPotetoModePi(text);
+	}
+	if (action.class === "adapt") {
+		text = base.endsWith(".md") ? applyBodyTransforms(text) : applyFileTransforms(text, action.rel);
 	}
 	return text;
 }
@@ -659,16 +896,6 @@ function patchReadmeCounts(text, counts) {
 		.replace(/\d+ principle skills/g, `${counts.principles} principle skills`);
 }
 
-function dropHowCriticsFromConfig(text) {
-	return text.replace(/\n\t"how critics",/g, "");
-}
-
-function dropHowCriticsFromSetup(text) {
-	return text
-		.replace("how explainer; how critics; why investigators", "how explainer; why investigators")
-		.replace("(`how critics`, `arena runners`", "(`arena runners`");
-}
-
 export function applyDerivedPatch(kind, destRoot, counts) {
 	if (kind === "catalog-counts") {
 		const dest = join(destRoot, "extensions/pstack/skill-catalog.test.ts");
@@ -680,13 +907,12 @@ export function applyDerivedPatch(kind, destRoot, counts) {
 		writeIfChanged(dest, patchReadmeCounts(readFileSync(dest, "utf8"), counts));
 		return;
 	}
-	if (kind === "drop-how-critics") {
-		const configPath = join(destRoot, "extensions/pstack/config.ts");
-		writeIfChanged(configPath, dropHowCriticsFromConfig(readFileSync(configPath, "utf8")));
-		const testPath = join(destRoot, "extensions/pstack/config.test.ts");
-		writeIfChanged(testPath, readFileSync(testPath, "utf8").replaceAll("how critics", "arena runners"));
-		const setupPath = join(destRoot, "skills/setup-pstack/SKILL.md");
-		writeIfChanged(setupPath, dropHowCriticsFromSetup(readFileSync(setupPath, "utf8")));
+}
+
+function removeEmptyDirs(dir, stopAt) {
+	while (dir !== stopAt && dir.startsWith(stopAt) && readdirSync(dir).length === 0) {
+		rmdirSync(dir);
+		dir = dirname(dir);
 	}
 }
 
@@ -704,6 +930,7 @@ export function apply(planned) {
 		}
 		if (action.kind === "delete") {
 			if (existsSync(action.dest)) unlinkSync(action.dest);
+			removeEmptyDirs(dirname(action.dest), join(planned.paths.to, "skills"));
 			continue;
 		}
 		if (action.kind === "patch") {
@@ -712,24 +939,40 @@ export function apply(planned) {
 	}
 }
 
+const CURSOR_LEFTOVERS = [
+	["AskQuestion", /AskQuestion/],
+	["ask_user_question", /ask_user_question/],
+	["subagent({", /subagent\(\{|`subagent\(\)`/],
+	["Task tool", /\bTask (?:tool|subagent)\b|`Task`/],
+	["generalPurpose", /generalPurpose/],
+	["readonly flag", /`readonly: (?:true|false)`/],
+	["cloud environment", /environment: "(?:cloud|local)"|cloud_base_branch|[Cc]loud[- ][Aa]gent|cloud VM/],
+	["pstack-models.mdc", /pstack-models\.mdc/],
+	["cursor-team-kit", /cursor-team-kit/],
+	["Cursor path", /\$HOME\/\.cursor|~\/\.cursor|\.cursor\/(?:skills|rules|projects|plugins)/],
+	["Cursor product", /(?<!Support\/)\bCursor(?:'s)?\b/],
+	["agent-transcripts", /agent-transcripts/],
+	["slash loop", /\/loop\b|\/goal\b/],
+	["@cursor-skill", /@cursor-skill/],
+	["merge marker", /<<<<<<</],
+	["Cursor model slug", CURSOR_SLUG_RE],
+];
+
+export function findCursorLeftovers(text) {
+	return CURSOR_LEFTOVERS.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
+}
+
 export function assertNoCursorSeams(destRoot) {
 	const skillsRoot = join(destRoot, "skills");
 	const rels = walkFiles(skillsRoot).map((rel) => asRelPath(`skills/${rel}`));
 	const leftover = [];
 	for (const rel of rels) {
 		if (matchesAny(rel, DEST_ONLY_NEVER)) continue;
-		const fileClass = classify(rel);
-		if (fileClass === "pi-only" || fileClass === "never-copy") continue;
+		if (classify(rel) === "never-copy") continue;
 		const text = readFileSync(join(destRoot, rel), "utf8");
-		if (text.includes("AskQuestion")) leftover.push(`${rel}: AskQuestion`);
-		if (text.includes("subagent_type")) leftover.push(`${rel}: subagent_type`);
-		if (text.includes("~/.cursor/rules/pstack-models.mdc")) leftover.push(`${rel}: pstack-models.mdc`);
-		if (text.includes("cursor-team-kit")) leftover.push(`${rel}: cursor-team-kit`);
-		if (text.includes("<<<<<<<")) leftover.push(`${rel}: merge marker`);
-		if (text.includes("Task subagent")) leftover.push(`${rel}: Task subagent`);
-		if (text.includes("$HOME/.cursor")) leftover.push(`${rel}: $HOME/.cursor`);
-		if (text.includes("@cursor-skill")) leftover.push(`${rel}: @cursor-skill`);
-		if (/from \./.test(text)) leftover.push(`${rel}: from .`);
+		if (rel.endsWith(".md")) {
+			for (const label of findCursorLeftovers(text)) leftover.push(`${rel}: ${label}`);
+		}
 		const parts = rel.split("/");
 		if (parts[parts.length - 1] !== "SKILL.md") continue;
 		const skillDir = parts[1];
