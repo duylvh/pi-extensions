@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "private": true,
-  "description": "Monorepo of Pi coding agent extensions by @zenspc",
+  "description": "Personal fork of the Pi extensions monorepo. Install the root from Git for pstack only.",
   "packageManager": "pnpm@9.15.0",
   "keywords": [
     "pi-package"
@@ -20,15 +20,15 @@
   },
   "pi": {
     "extensions": [
-      "./packages/pi-safety/extensions",
-      "./packages/pi-workflow/extensions",
-      "./packages/pi-devtools/extensions",
-      "./packages/pi-preferred-thinking/extensions/preferred-thinking.ts",
-      "./packages/pi-copilot-discovery/src/index.ts",
-      "./packages/pi-spinner/src/index.ts",
-      "./packages/pi-quiet/src/index.ts",
-      "./packages/pi-sticky-editor/src/index.ts",
       "./packages/pi-pstack/extensions/pstack/index.ts"
-    ]
+    ],
+    "skills": [
+      "./packages/pi-pstack/skills"
+    ],
+    "subagents": {
+      "agents": [
+        "./packages/pi-pstack/agents"
+      ]
+    }
   }
 }

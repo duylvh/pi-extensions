@@ -9,12 +9,19 @@ If you want to go fast, go deep first. pstack helps you write less, but higher q
 ## Install
 
 ```bash
+pi install git:github.com/duylvh/pi-extensions
+```
+
+The repository root is a pstack-only Pi package. Its `package.json` manifest points at this directory's extension, skills, and agents, and the other monorepo packages are not loaded through it. Pin a ref with `@<tag-or-commit>`. Restart Pi or `/reload` afterward.
+
+For development, install this directory from a local clone instead. A path install is not copied, so `git pull` in the clone updates it.
+
+```bash
 git clone https://github.com/duylvh/pi-extensions /path/to/fork
 pi install /path/to/fork/packages/pi-pstack
 ```
 
-A path install is not copied, so `git pull` in the clone updates it. Restart Pi or `/reload`.
-Remove any `npm:@zenspc/pi-pstack` entry from your Pi settings first, because two copies of the same skills collide.
+Remove any `npm:@zenspc/pi-pstack` or other pstack entry from your Pi settings first, because two copies of the same skills collide. Run only one of the Git and path installs.
 
 Requires [`@tintinweb/pi-subagents`](https://www.npmjs.com/package/@tintinweb/pi-subagents) for the `Agent` tool behind `poteto-agent`, `comment-sicko`, and the workflow fan-outs (`how`, `why`, `arena`, `swarm`, `interrogate`, `reflect`). The package declares its agents through `pi.subagents.agents` in `package.json`.
 
